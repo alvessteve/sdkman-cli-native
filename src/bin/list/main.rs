@@ -34,13 +34,10 @@ fn main() {
 
     match args.candidate {
         Some(candidate) => {
-            // List versions for a specific candidate
             let candidate = validate_candidate(all_candidates, &candidate);
 
-            // Validate and process subcommand
             match args.subcommand.as_deref() {
                 Some("installed") => {
-                    // Show only installed versions
                     let candidate_dir = sdkman_dir.join(CANDIDATES_DIR).join(&candidate);
                     let current_version = get_current_version(&candidate_dir);
                     list_installed_versions(&candidate_dir, &candidate, current_version);
@@ -54,22 +51,34 @@ fn main() {
                     process::exit(1);
                 }
                 None => {
-                    // Normal list (online if available, offline otherwise)
                     list_candidate_versions(sdkman_dir, &candidate);
                 }
             }
         }
         None => {
-            // List all candidates
             list_all_candidates(all_candidates);
         }
     }
 }
 
 fn list_all_candidates(candidates: Vec<&str>) {
-    // Note: The bash version makes an API call to show all available candidates with descriptions.
-    // Since this is a native binary focused on performance and offline operation,
-    // we show locally known candidates instead.
+    if !is_offline() {
+        match fetch_all_candidates() {
+            Ok(response) => {
+                println!("{}", response);
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    "Unable to fetch online candidates, showing local cache only.".yellow()
+                );
+                if std::env::var("SDKMAN_DEBUG").is_ok() {
+                    eprintln!("{}: {}", "Debug".dimmed(), e);
+                }
+            }
+        }
+    }
 
     println!(
         "{}",
@@ -108,22 +117,17 @@ fn list_all_candidates(candidates: Vec<&str>) {
 fn list_candidate_versions(sdkman_dir: PathBuf, candidate: &str) {
     let candidate_dir = sdkman_dir.join(CANDIDATES_DIR).join(candidate);
 
-    // Get current version and installed versions CSV
     let current_version = get_current_version(&candidate_dir);
     let installed_csv = build_versions_csv(&candidate_dir);
 
-    // Check if we should use online mode
     if !is_offline() {
-        // Try to fetch from API
         let current = current_version.as_deref().unwrap_or("");
         match fetch_online_versions(candidate, current, &installed_csv) {
             Ok(response) => {
-                // Display the API response (it's already formatted)
                 println!("{}", response);
                 return;
             }
             Err(e) => {
-                // Warn user but continue with offline mode
                 eprintln!(
                     "{}",
                     "Unable to fetch online versions, showing installed only.".yellow()
@@ -135,7 +139,6 @@ fn list_candidate_versions(sdkman_dir: PathBuf, candidate: &str) {
         }
     }
 
-    // Offline mode: show only installed versions
     list_installed_versions(&candidate_dir, candidate, current_version);
 }
 
@@ -144,13 +147,11 @@ fn list_installed_versions(
     candidate: &str,
     current_version: Option<String>,
 ) {
-    // Check if candidate is installed
     if !candidate_dir.exists() || !candidate_dir.is_dir() {
         eprintln!("{} is not installed.", candidate.bold());
         process::exit(1);
     }
 
-    // Read all installed versions
     let mut versions: Vec<String> = match get_installed_versions(candidate_dir) {
         Ok(versions) => versions,
         Err(_) => {
@@ -159,7 +160,6 @@ fn list_installed_versions(
         }
     };
 
-    // Print header matching bash format
     println!(
         "{}",
         "--------------------------------------------------------------------------------".normal()
@@ -176,23 +176,18 @@ fn list_installed_versions(
     if versions.is_empty() {
         println!("{}", "   None installed!".yellow());
     } else {
-        // Sort versions in reverse order (newest first, matching bash behavior)
         versions.sort();
         versions.reverse();
 
-        // Print versions with markers (matching bash format)
         for version in versions {
             if current_version.as_ref() == Some(&version) {
-                // Currently in use - marked with >
                 println!(" {} {}", ">".normal(), version);
             } else {
-                // Installed - marked with *
                 println!(" {} {}", "*".normal(), version);
             }
         }
     }
 
-    // Print legend matching bash format
     println!(
         "{}",
         "--------------------------------------------------------------------------------".normal()
@@ -218,7 +213,6 @@ fn get_current_version(candidate_dir: &std::path::Path) -> Option<String> {
         return None;
     }
 
-    // Get the symlink target (which should be the version)
     if let Ok(target) = fs::read_link(&current_link) {
         // Extract the version from the path
         return target
@@ -227,7 +221,6 @@ fn get_current_version(candidate_dir: &std::path::Path) -> Option<String> {
             .map(|s| s.to_string());
     }
 
-    // If this is not a symlink but a directory (fallback case)
     if current_link.is_dir() {
         return current_link
             .file_name()
@@ -245,12 +238,10 @@ fn get_installed_versions(candidate_dir: &std::path::Path) -> Result<Vec<String>
             let path = entry.path();
             let name = entry.file_name().to_str()?.to_string();
 
-            // Skip "current" directory/symlink
             if name == CURRENT_DIR {
                 return None;
             }
 
-            // Only include directories
             path.is_dir().then_some(name)
         })
         .collect();
@@ -264,42 +255,62 @@ fn build_versions_csv(candidate_dir: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
+fn create_http_client() -> Result<reqwest::blocking::Client, String> {
+    use std::time::Duration;
+
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent(format!("sdkman-cli-native/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))
+}
+
+fn handle_http_error(e: reqwest::Error) -> String {
+    if e.is_timeout() {
+        "Request timed out after 10 seconds".to_string()
+    } else if e.is_connect() {
+        "Failed to connect to API - check your internet connection".to_string()
+    } else {
+        format!("Network error: {}", e)
+    }
+}
+
+fn fetch_all_candidates() -> Result<String, String> {
+    let client = create_http_client()?;
+    let url = format!("{}/candidates/list", SDKMAN_CANDIDATES_API);
+
+    let response = client.get(&url).send().map_err(handle_http_error)?;
+
+    if response.status().is_success() {
+        response
+            .text()
+            .map_err(|e| format!("Failed to read response: {}", e))
+    } else {
+        Err(format!(
+            "API request failed with status: {}",
+            response.status()
+        ))
+    }
+}
+
 fn fetch_online_versions(
     candidate: &str,
     current: &str,
     installed_csv: &str,
 ) -> Result<String, String> {
-    use std::time::Duration;
-
+    let client = create_http_client()?;
     let platform = get_platform();
 
-    // Build client with timeout and user agent
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent(format!("sdkman-cli-native/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
-    // Build URL with proper encoding
     let url = format!(
         "{}/candidates/{}/{}/versions/list",
         SDKMAN_CANDIDATES_API, candidate, platform
     );
 
-    // Send request with query parameters (reqwest handles encoding)
     let response = client
         .get(&url)
         .query(&[("current", current), ("installed", installed_csv)])
         .send()
-        .map_err(|e| {
-            if e.is_timeout() {
-                "Request timed out after 10 seconds".to_string()
-            } else if e.is_connect() {
-                "Failed to connect to API - check your internet connection".to_string()
-            } else {
-                format!("Failed to fetch versions: {}", e)
-            }
-        })?;
+        .map_err(handle_http_error)?;
 
     if response.status().is_success() {
         response

@@ -32,6 +32,7 @@ fn should_list_all_candidates() -> Result<(), Box<dyn std::error::Error>> {
 
     let sdkman_dir = support::virtual_env(env);
     env::set_var("SDKMAN_DIR", sdkman_dir.path().as_os_str());
+    env::set_var("SDKMAN_OFFLINE_MODE", "true");
 
     let contains_header = predicate::str::contains("Available Candidates");
     let contains_separator = predicate::str::contains(
@@ -50,6 +51,8 @@ fn should_list_all_candidates() -> Result<(), Box<dyn std::error::Error>> {
                 .and(contains_kotlin),
         )
         .code(0);
+
+    env::remove_var("SDKMAN_OFFLINE_MODE");
 
     Ok(())
 }
