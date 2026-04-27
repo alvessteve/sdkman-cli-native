@@ -4,6 +4,8 @@ pub mod constants {
     pub const CURRENT_DIR: &str = "current";
     pub const DEFAULT_SDKMAN_HOME: &str = ".sdkman";
     pub const SDKMAN_DIR_ENV_VAR: &str = "SDKMAN_DIR";
+    pub const SDKMAN_OFFLINE_ENV_VAR: &str = "SDKMAN_OFFLINE_MODE";
+    pub const SDKMAN_CANDIDATES_API: &str = "https://api.sdkman.io/2";
     pub const TMP_DIR: &str = "tmp";
     pub const VAR_DIR: &str = "var";
 }
@@ -15,8 +17,33 @@ pub mod helpers {
     use std::{env, fs, process};
 
     use crate::constants::{
-        CANDIDATES_DIR, CANDIDATES_FILE, DEFAULT_SDKMAN_HOME, SDKMAN_DIR_ENV_VAR, VAR_DIR,
+        CANDIDATES_DIR, CANDIDATES_FILE, DEFAULT_SDKMAN_HOME, SDKMAN_DIR_ENV_VAR,
+        SDKMAN_OFFLINE_ENV_VAR, VAR_DIR,
     };
+
+    pub fn is_offline() -> bool {
+        env::var(SDKMAN_OFFLINE_ENV_VAR)
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false)
+    }
+
+    pub fn get_platform() -> &'static str {
+        // Match bash SDKMAN platform detection
+        match env::consts::OS {
+            "macos" => "Darwin",
+            "linux" => "Linux",
+            "freebsd" => "FreeBSD",
+            "windows" => "MINGW64_NT",
+            _ => {
+                // Default to Linux for unknown platforms
+                eprintln!(
+                    "Warning: Unknown platform '{}', defaulting to Linux",
+                    env::consts::OS
+                );
+                "Linux"
+            }
+        }
+    }
 
     pub fn infer_sdkman_dir() -> PathBuf {
         match env::var(SDKMAN_DIR_ENV_VAR) {
@@ -40,15 +67,13 @@ pub mod helpers {
     }
 
     pub fn read_file_content(path: PathBuf) -> Option<String> {
-        match fs::read_to_string(path) {
-            Ok(s) => Some(s),
-            Err(_) => None,
-        }
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim().to_string())
+        fs::read_to_string(path)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
     }
 
-    pub fn known_candidates<'a>(sdkman_dir: PathBuf) -> Vec<&'static str> {
+    pub fn known_candidates(sdkman_dir: PathBuf) -> Vec<&'static str> {
         let absolute_path = sdkman_dir.join(VAR_DIR).join(CANDIDATES_FILE);
         let verified_path = check_file_exists(absolute_path);
         let panic = format!(
